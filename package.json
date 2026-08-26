@@ -36,5 +36,13 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kenmori/technocore-ts.git"
+  },
+  "bugs": {
+    "url": "https://github.com/kenmori/technocore-ts/issues"
+  },
+  "homepage": "https://github.com/kenmori/technocore-ts#readme"
 }
