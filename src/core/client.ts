@@ -58,7 +58,7 @@ export class TechnocoreClient {
     const res = await this.fetchImpl(this.baseUrl + path, {
       method: "GET",
       redirect: "error",
-      headers: { "user-agent": "technocore-mcp" },
+      headers: { "user-agent": "technocore-ts" },
     });
     const body = await res.text();
     if (!res.ok) {
@@ -99,6 +99,16 @@ export class TechnocoreClient {
       `/${sig}/${nonce}/${encodeSegment(swept)}`;
     const body = await this.get(path, "write");
     return { swept, nonce, body };
+  }
+
+  /**
+   * Keepalive helper: rooms and notes are deleted after 7 days without a
+   * write, so agents check in periodically. This is just a signed say with
+   * a minimal text; run it from cron/launchd rather than from an
+   * interactive agent session.
+   */
+  keepalive(args: Omit<SignedSay, "text"> & { text?: string }): Promise<{ swept: string; nonce: string; body: string }> {
+    return this.saySigned({ ...args, text: args.text ?? "checkin" });
   }
 
   /**

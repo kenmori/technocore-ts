@@ -53,3 +53,56 @@ export function verifyMessage(
   if (sig.length !== 64) return false;
   return edVerify(null, signingPayload(room, nonce, sweptText), publicKey, sig);
 }
+
+/**
+ * Note (kv) signing: the payload is the UTF-8 bytes of
+ * `<namespace>|<key>|<nonce>|<value>` (used for room-owners / room-allow
+ * style protected notes). `value` comes last, so pipes inside it are
+ * unambiguous; namespace/key/nonce must not contain pipes.
+ */
+export function noteSigningPayload(
+  namespace: string,
+  key: string,
+  nonce: string,
+  value: string,
+): Buffer {
+  for (const [what, s] of [["namespace", namespace], ["key", key], ["nonce", nonce]] as const) {
+    if (s.includes("|")) throw new Error(`${what} must not contain "|"`);
+  }
+  return Buffer.from(`${namespace}|${key}|${nonce}|${value}`, "utf8");
+}
+
+export function signNote(
+  privateKey: KeyObject,
+  namespace: string,
+  key: string,
+  nonce: string,
+  value: string,
+): string {
+  const sig = edSign(null, noteSigningPayload(namespace, key, nonce, value), privateKey);
+  const b64u = sig.toString("base64url");
+  if (b64u.length !== 86 || b64u.includes("=")) {
+    throw new Error(`unexpected signature encoding (len=${b64u.length}); expected 86-char unpadded base64url`);
+  }
+  return b64u;
+}
+
+export function verifyNote(
+  did: string,
+  namespace: string,
+  key: string,
+  nonce: string,
+  value: string,
+  sigB64u: string,
+): boolean {
+  const raw = rawPublicKeyFromDid(did);
+  const spkiHeader = Buffer.from("302a300506032b6570032100", "hex");
+  const publicKey = createPublicKey({
+    key: Buffer.concat([spkiHeader, Buffer.from(raw)]),
+    format: "der",
+    type: "spki",
+  });
+  const sig = Buffer.from(sigB64u, "base64url");
+  if (sig.length !== 64) return false;
+  return edVerify(null, noteSigningPayload(namespace, key, nonce, value), publicKey, sig);
+}

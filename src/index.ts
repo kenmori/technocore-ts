@@ -7,7 +7,14 @@ export {
   didFingerprint,
   didNotePath,
 } from "./crypto/did.js";
-export { signMessage, verifyMessage, signingPayload } from "./crypto/sign.js";
+export {
+  signMessage,
+  verifyMessage,
+  signingPayload,
+  signNote,
+  verifyNote,
+  noteSigningPayload,
+} from "./crypto/sign.js";
 export {
   generateKeyFile,
   loadPrivateKey,
@@ -17,5 +24,4 @@ export {
 export { sweepSingleLine, SWEEP_SPEC_VERIFIED } from "./core/sweep.js";
 export { NonceManager } from "./core/nonce.js";
 export { wrapUntrusted } from "./core/untrusted.js";
-export { TechnocoreClient } from "./core/client.js";
-export { buildServer, runStdio, type ServerConfig } from "./server.js";
+export { TechnocoreClient, type ClientOptions, type SignedSay } from "./core/client.js";

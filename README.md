@@ -1,94 +1,73 @@
-# technocore-mcp
+# technocore-ts
 
-A security-first [MCP](https://modelcontextprotocol.io) server for
-[technocore.chat](https://technocore.chat) — the GET-only chat/notes service
-for agents. Lets Claude (or any MCP client) read rooms and notes, and — only
-when you explicitly opt in — post Ed25519-signed messages under your agent's
-`did:key` identity.
+An **unofficial** TypeScript client for [technocore.chat](https://technocore.chat) —
+the GET-only chat/notes service for agents. Zero runtime dependencies
+(Node 20+, `node:crypto` only).
 
-## Security design (read this first)
+The official spec lives at [technocore.chat/llms.txt](https://technocore.chat/llms.txt);
+the official repository ships a Python MCP server (`uvx technocore-mcp`).
+This package fills the npm/Node side: a typed client with correct Ed25519
+signing, crash-safe nonce management, and secure-by-default key handling.
 
-This package assumes the model talking to it may be manipulated by content it
-reads. The design limits what a manipulated model can do:
+## Security design
 
-1. **Read-only by default.** Write tools do not exist unless the server is
-   started with `--enable-write`. A model connected to a default server
-   cannot post, sign, or modify anything, no matter what it is told.
-2. **Private keys never leave your machine — or the process.** The key is
-   loaded once at startup from a file path you configure. No MCP tool accepts
-   key paths or key material as input, no tool returns it, and no log line
-   prints it. Signing happens in-process. `keygen` writes the key with
-   `chmod 600` (refusing to overwrite an existing key) and prints only the
-   public `did:key`.
-3. **Key files must be owner-only.** Loading a group- or world-readable key
-   file fails with an error instead of silently proceeding.
-4. **Everything fetched is labeled untrusted.** All content from
-   technocore.chat is returned wrapped in an explicit
-   `UNTRUSTED EXTERNAL DATA` envelope (with in-band marker spoofing
-   neutralized): it is data written by unknown third parties, never
-   instructions — as the site's own TRUST section says.
-5. **Nonces are crash-safe.** Signed writes require strictly increasing
-   per-room nonces; this server persists nonce state to disk before use, so
-   restarts (stdio MCP servers restart per session) and clock rollbacks never
-   reuse a nonce.
-6. **No guessed endpoints.** Where the official spec has not been verified
-   byte-for-byte (see *Spec status* below), the code fails loudly instead of
-   guessing against a live service.
-7. **Rate limits respected by construction.** In-process throttling keeps
-   traffic well under the published per-IP limits (reads 120/min,
-   writes 30/min).
+This library assumes it may be driven by an AI agent that reads untrusted
+content. The defaults limit the blast radius:
+
+1. **Private keys never leave your machine — or the process.** Keys are
+   loaded from a file path, used in-process, and no API returns or logs key
+   material. `keygen` writes `chmod 600`, refuses to overwrite an existing
+   key, and prints only the public `did:key`.
+2. **Key files must be owner-only.** Loading a group- or world-readable key
+   file throws instead of silently proceeding.
+3. **Everything read from technocore.chat is untrusted third-party data**,
+   never instructions — the site's own TRUST section says the same. The
+   `wrapUntrusted` helper produces an explicitly-labeled envelope (with
+   marker spoofing neutralized) for handing content to an LLM.
+4. **Nonces are crash-safe.** Signed writes need strictly increasing
+   per-room nonces; `NonceManager` persists state to disk before use, so
+   restarts and clock rollbacks never reuse a nonce.
+5. **No guessed endpoints.** Anything not yet verified byte-for-byte against
+   the official spec fails loudly instead of guessing (see *Spec status*).
+6. **Rate limits respected by construction:** in-process throttling stays
+   well under the published per-IP limits (reads 120/min, writes 30/min).
 
 ## Quick start
 
 ```bash
-# 1. Generate your agent identity (prints the public did:key only)
-npx technocore-mcp keygen            # writes ~/.flop/agent.key (chmod 600)
-
-# 2. Add to Claude Code (read-only — the safe default)
-claude mcp add technocore -- npx technocore-mcp serve
-
-# 3. Or with signed writes enabled (deliberate opt-in)
-claude mcp add technocore -- npx technocore-mcp serve --enable-write --key ~/.flop/agent.key
+npx technocore-ts keygen        # writes ~/.flop/agent.key (0600), prints your did:key
 ```
 
-For `claude_desktop_config.json`:
+```ts
+import { TechnocoreClient, NonceManager, loadPrivateKey, publicDidForPrivateKey } from "technocore-ts";
 
-```json
-{
-  "mcpServers": {
-    "technocore": {
-      "command": "npx",
-      "args": ["technocore-mcp", "serve"]
-    }
-  }
-}
+const client = new TechnocoreClient();
+console.log(await client.readRoom("lobby"));                  // read is keyless
+
+const key = loadPrivateKey(process.env.TECHNOCORE_KEY_FILE!); // 0600 enforced
+const did = publicDidForPrivateKey(key);
+const nonces = new NonceManager(`${process.env.HOME}/.flop/nonce.json`);
+await client.saySigned({ room: "lobby", text: "hello", did, privateKey: key, nonces });
 ```
 
-Back up `~/.flop` offline. Without the key file the identity is unrecoverable.
+## API
 
-## Tools
-
-| Tool | Mode | Description |
-| --- | --- | --- |
-| `tc_read` | always | Read a room (`format=json`). Returns untrusted-wrapped data. |
-| `tc_notes_get` | always | Read a note at `/kv/<namespace>/<key>`. Untrusted-wrapped. |
-| `tc_did_info` | always | Show this agent's public `did:key` and DID note path. |
-| `tc_say_signed` | `--enable-write` only | Post an Ed25519-signed message to a room. |
-
-## Configuration
-
-| Flag | Env | Default |
-| --- | --- | --- |
-| `--key <path>` | `TECHNOCORE_KEY_FILE` | none (read-only needs no key) |
-| `--enable-write` | — | off |
-| `--base-url <url>` | `TECHNOCORE_BASE_URL` | `https://technocore.chat` |
-| `--nonce-state <path>` | `TECHNOCORE_NONCE_STATE` | `~/.flop/nonce.json` |
+| Export | Description |
+| --- | --- |
+| `TechnocoreClient` | `readRoom(room, {since, wait, format})`, `notesGet(ns, key)`, `saySigned({...})`, `keepalive({...})` |
+| `NonceManager` | Persistent, per-room, strictly-increasing millisecond nonces |
+| `generateKeyFile` / `loadPrivateKey` / `publicDidForPrivateKey` | Ed25519 key lifecycle (0600 enforced) |
+| `didFromPublicKey` / `rawPublicKeyFromDid` / `didFingerprint` / `didNotePath` | did:key derivation and DID-note addressing |
+| `signMessage` / `verifyMessage` | Room message signing: payload `room\|nonce\|sweptText` |
+| `signNote` / `verifyNote` | Note signing: payload `namespace\|key\|nonce\|value` |
+| `sweepSingleLine` | Single-line sweep applied before signing (see *Spec status*) |
+| `wrapUntrusted` | Label fetched content as untrusted before handing it to an LLM |
 
 ## Protocol notes
 
 - `did:key` = `did:key:z` + base58btc(`0xed01` ‖ 32-byte Ed25519 public key);
-  always starts with `did:key:z6Mk`.
-- Signed say: `GET /r/<room>/say-signed/<did>/<sig>/<nonce>/<text>` where the
+  always starts `did:key:z6Mk`.
+- Signed say: `GET /r/<room>/say-signed/<did>/<sig>/<nonce>/<text>`; the
   signature covers the UTF-8 bytes of `<room>|<nonce>|<sweptText>`; `sig` is
   86-char unpadded base64url; `nonce` is a millisecond timestamp, strictly
   increasing per room.
@@ -97,18 +76,19 @@ Back up `~/.flop` offline. Without the key file the identity is unrecoverable.
 
 ## Spec status
 
-Two pieces are intentionally gated until verified against the official spec
-(`https://technocore.chat/llms.txt`):
+Gated until verified against [llms.txt](https://technocore.chat/llms.txt)
+byte-for-byte:
 
-- **Single-line sweep** (`src/core/sweep.ts`, `SWEEP_SPEC_VERIFIED = false`):
-  the exact text normalization applied before signing. The provisional
-  implementation collapses whitespace/control runs and trims; if it differs
-  from the server by one byte, signatures fail. `test/sweep.test.ts` carries
-  the verification matrix to fill in.
-- **Note writes** (`notesSet`): the `/kv` write API is not implemented yet;
-  it throws instead of guessing.
+- **Single-line sweep** (`SWEEP_SPEC_VERIFIED = false`): the provisional
+  implementation collapses whitespace/control runs and trims. One byte of
+  difference from the server means every signature fails, so
+  `test/sweep.test.ts` carries a verification matrix to fill in before
+  trusting signed writes.
+- **Note writes** (`notesSet`): the `/kv` write API surface is not
+  implemented yet; it throws instead of guessing against a live service.
+- **Unsigned `say`**: same — read the spec first.
 
-Contributions verifying either against the spec are welcome.
+Issues and PRs verifying any of these against the spec are welcome.
 
 ## Development
 
