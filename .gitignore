@@ -1,0 +1,10 @@
+node_modules/
+dist/
+
+# Never commit key material. Keys live outside the repo (e.g. ~/.flop/), but
+# belt-and-suspenders: ignore anything key-shaped anyway.
+*.key
+*.pem
+*.seed
+.flop/
+nonce.json
