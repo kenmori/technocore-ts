@@ -1,15 +1,25 @@
 import type { KeyObject } from "node:crypto";
-import { signMessage } from "../crypto/sign.js";
-import { sweepSingleLine } from "./sweep.js";
+import { signMessage, signNote } from "../crypto/sign.js";
+import { sweepSingleLine, MAX_TEXT_CHARS, MAX_VALUE_CHARS } from "./sweep.js";
 import type { NonceManager } from "./nonce.js";
 
 /**
  * Thin HTTP client for technocore.chat.
  *
- * - GET-only API, per the site's design.
- * - Courtesy rate limiting well under the published limits
- *   (reads 120/min, writes 30/min, per IP): one read per 600ms,
- *   one write per 2500ms, enforced in-process.
+ * API surface verified against the official server source
+ * (flop-labs/technocore-chat, src/app.py route table, commit 41ecbbb):
+ *
+ *   GET /r/{room}                                        read (?since,wait,format)
+ *   GET /r/{room}/say/{nick}/{text}                      unsigned say
+ *   GET /r/{room}/say-signed/{did}/{sig}/{nonce}/{text}  signed say
+ *   GET /kv/{ns}                                         list notes
+ *   GET /kv/{ns}/{key}                                   read note
+ *   GET /kv/{ns}/{key}/set/{value}                       unsigned note write (+ ?if / ?if_absent)
+ *   GET /kv/{ns}/{key}/set-signed/{did}/{sig}/{nonce}/{value}
+ *                                       signed note write (room-owners / room-allow only)
+ *
+ * - Courtesy rate limiting well under the published limits (reads 120/min,
+ *   writes 30/min, per IP): one read per 600ms, one write per 2500ms.
  * - `fetchImpl` is injectable so tests never touch the network.
  */
 export interface ClientOptions {
@@ -25,6 +35,13 @@ export interface SignedSay {
   did: string;
   privateKey: KeyObject;
   nonces: NonceManager;
+}
+
+export interface NoteCondition {
+  /** Write only if the note currently holds exactly this value (`?if=`). */
+  ifEquals?: string;
+  /** Write only if the note does not exist yet (`?if_absent=1`). */
+  ifAbsent?: boolean;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -77,21 +94,38 @@ export class TechnocoreClient {
     return this.get(`/r/${encodeSegment(room)}?${params}`, "read");
   }
 
+  /** List notes in a namespace. */
+  notesList(namespace: string): Promise<string> {
+    return this.get(`/kv/${encodeSegment(namespace)}`, "read");
+  }
+
   /** Read a note at /kv/<namespace>/<key>. */
   notesGet(namespace: string, key: string): Promise<string> {
     return this.get(`/kv/${encodeSegment(namespace)}/${encodeSegment(key)}`, "read");
   }
 
+  /** Unsigned say: GET /r/<room>/say/<nick>/<text>. `from` is just a nickname. */
+  async say(room: string, nick: string, text: string): Promise<{ swept: string; body: string }> {
+    assertNoPipeOrSlash(room, "room");
+    assertNoPipeOrSlash(nick, "nick");
+    const swept = sweepMessage(text);
+    const body = await this.get(
+      `/r/${encodeSegment(room)}/say/${encodeSegment(nick)}/${encodeSegment(swept)}`,
+      "write",
+    );
+    return { swept, body };
+  }
+
   /**
-   * Signed message: GET /r/<room>/say-signed/<did>/<sig>/<nonce>/<text>.
+   * Signed say: GET /r/<room>/say-signed/<did>/<sig>/<nonce>/<text>.
    * The signature covers the UTF-8 bytes of `<room>|<nonce>|<sweptText>`.
-   * Returns { swept, nonce, body } so callers can display exactly what was
-   * signed and sent.
+   * The server requires the nonce to be strictly greater than the last nonce
+   * this DID used in this room. Returns { swept, nonce, body } so callers can
+   * display exactly what was signed and sent.
    */
   async saySigned(args: SignedSay): Promise<{ swept: string; nonce: string; body: string }> {
-    const room = assertNoPipe(args.room, "room");
-    const swept = sweepSingleLine(args.text);
-    if (swept.length === 0) throw new Error("text is empty after single-line sweep");
+    const room = assertNoPipeOrSlash(args.room, "room");
+    const swept = sweepMessage(args.text);
     const nonce = args.nonces.next(room);
     const sig = signMessage(args.privateKey, room, nonce, swept);
     const path =
@@ -112,25 +146,93 @@ export class TechnocoreClient {
   }
 
   /**
-   * !! SPEC-PENDING !!
-   * Note writes: the exact write path/params for /kv are defined by the
-   * official spec (llms.txt / patterns.md) and must be confirmed against it.
-   * This method is deliberately not implemented until then — guessing a
-   * write API against a live service is worse than failing loudly.
+   * Unsigned note write: GET /kv/<ns>/<key>/set/<value>.
+   * Ordinary namespaces are world-writable by design (a note is public,
+   * last-writer-wins). Conditional writes: `ifEquals` maps to `?if=<text>`
+   * (replace only if it still holds exactly this), `ifAbsent` to
+   * `?if_absent=1` (create only). This is the DID-note registration lane.
    */
-  notesSet(): never {
-    throw new Error(
-      "notesSet is not implemented yet: the /kv write API must be confirmed against " +
-        "https://technocore.chat/llms.txt before this client will write notes (SPEC-PENDING).",
+  async notesSet(
+    namespace: string,
+    key: string,
+    value: string,
+    cond: NoteCondition = {},
+  ): Promise<{ swept: string; body: string }> {
+    assertNoPipeOrSlash(namespace, "namespace");
+    assertNoPipeOrSlash(key, "key");
+    const swept = sweepValue(value);
+    const q = conditionQuery(cond);
+    const body = await this.get(
+      `/kv/${encodeSegment(namespace)}/${encodeSegment(key)}/set/${encodeSegment(swept)}${q}`,
+      "write",
     );
+    return { swept, body };
   }
+
+  /**
+   * Signed note write: GET /kv/<ns>/<key>/set-signed/<did>/<sig>/<nonce>/<value>.
+   * The server accepts signed note writes ONLY for the room-ownership
+   * namespaces (`room-owners`, `room-allow`); every other namespace is
+   * world-writable and must use `notesSet`. The signature covers
+   * `<ns>|<key>|<nonce>|<sweptValue>`. Nonces for these writes are a
+   * per-room burn counter on the server: single-use, strictly increasing.
+   */
+  async notesSetSigned(args: {
+    namespace: string;
+    key: string;
+    value: string;
+    did: string;
+    privateKey: KeyObject;
+    nonces: NonceManager;
+    cond?: NoteCondition;
+  }): Promise<{ swept: string; nonce: string; body: string }> {
+    const ns = assertNoPipeOrSlash(args.namespace, "namespace");
+    const key = assertNoPipeOrSlash(args.key, "key");
+    const swept = sweepValue(args.value);
+    const nonce = args.nonces.next(`${ns}/${key}`);
+    const sig = signNote(args.privateKey, ns, key, nonce, swept);
+    const q = conditionQuery(args.cond ?? {});
+    const body = await this.get(
+      `/kv/${encodeSegment(ns)}/${encodeSegment(key)}/set-signed/${encodeSegment(args.did)}` +
+        `/${sig}/${nonce}/${encodeSegment(swept)}${q}`,
+      "write",
+    );
+    return { swept, nonce, body };
+  }
+}
+
+function sweepMessage(text: string): string {
+  const swept = sweepSingleLine(text);
+  if (swept.length === 0) throw new Error("text is empty after single-line sweep");
+  if (swept.length > MAX_TEXT_CHARS) {
+    throw new Error(`text too long after sweep: ${swept.length} chars, limit ${MAX_TEXT_CHARS}`);
+  }
+  return swept;
+}
+
+function sweepValue(value: string): string {
+  const swept = sweepSingleLine(value);
+  if (swept.length === 0) throw new Error("value is empty after single-line sweep");
+  if (swept.length > MAX_VALUE_CHARS) {
+    throw new Error(`value too long after sweep: ${swept.length} chars, limit ${MAX_VALUE_CHARS}`);
+  }
+  return swept;
+}
+
+function conditionQuery(cond: NoteCondition): string {
+  if (cond.ifAbsent && cond.ifEquals !== undefined) {
+    throw new Error("ifAbsent and ifEquals are mutually exclusive");
+  }
+  if (cond.ifAbsent) return "?if_absent=1";
+  if (cond.ifEquals !== undefined) return `?if=${encodeURIComponent(cond.ifEquals)}`;
+  return "";
 }
 
 function encodeSegment(s: string): string {
   return encodeURIComponent(s);
 }
 
-function assertNoPipe(s: string, what: string): string {
+function assertNoPipeOrSlash(s: string, what: string): string {
   if (s.includes("|") || s.includes("/")) {
     // "|" would make the signing payload framing ambiguous; "/" would break paths.
     throw new Error(`${what} must not contain "|" or "/"`);

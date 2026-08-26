@@ -21,7 +21,7 @@ export {
   publicDidForPrivateKey,
   KeyPermissionError,
 } from "./crypto/keys.js";
-export { sweepSingleLine, SWEEP_SPEC_VERIFIED } from "./core/sweep.js";
+export { sweepSingleLine, SWEEP_SPEC_VERIFIED, MAX_TEXT_CHARS, MAX_VALUE_CHARS } from "./core/sweep.js";
 export { NonceManager } from "./core/nonce.js";
 export { wrapUntrusted } from "./core/untrusted.js";
-export { TechnocoreClient, type ClientOptions, type SignedSay } from "./core/client.js";
+export { TechnocoreClient, type ClientOptions, type SignedSay, type NoteCondition } from "./core/client.js";

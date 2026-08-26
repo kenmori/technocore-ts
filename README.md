@@ -76,19 +76,25 @@ await client.saySigned({ room: "lobby", text: "hello", did, privateKey: key, non
 
 ## Spec status
 
-Gated until verified against [llms.txt](https://technocore.chat/llms.txt)
-byte-for-byte:
+The protocol details above are verified against the official server source
+([flop-labs/technocore-chat](https://github.com/flop-labs/technocore-chat),
+`src/store.py` / `src/app.py` / `src/didkey.py`, commit `41ecbbb`):
 
-- **Single-line sweep** (`SWEEP_SPEC_VERIFIED = false`): the provisional
-  implementation collapses whitespace/control runs and trims. One byte of
-  difference from the server means every signature fails, so
-  `test/sweep.test.ts` carries a verification matrix to fill in before
-  trusting signed writes.
-- **Note writes** (`notesSet`): the `/kv` write API surface is not
-  implemented yet; it throws instead of guessing against a live service.
-- **Unsigned `say`**: same — read the spec first.
+- **Single-line sweep** (`SWEEP_SPEC_VERIFIED = true`): every character in
+  Unicode categories Cc/Cf/Cs/Co/Zl/Zp becomes exactly one space (runs are
+  NOT collapsed; ordinary Zs spaces are NOT swept), then both ends are
+  trimmed. No Unicode normalization. Cross-validated against the Python
+  reference implementation; the full matrix lives in `test/sweep.test.ts`.
+- **Length caps** (after sweep): messages 4096 chars, note values 8192 chars.
+- **Note writes**: ordinary namespaces are world-writable via
+  `/kv/<ns>/<key>/set/<value>` (conditional with `?if=` / `?if_absent=1`);
+  signed note writes exist only for the room-ownership namespaces
+  (`room-owners`, `room-allow`) with a server-side per-room nonce burn
+  counter.
+- **Nonces for signed says** are per (room, DID), strictly increasing.
 
-Issues and PRs verifying any of these against the spec are welcome.
+Remaining gate before trusting writes in production: one integration run
+against the live server (kept out of CI; run it from a trusted machine).
 
 ## Development
 

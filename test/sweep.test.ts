@@ -1,47 +1,62 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { sweepSingleLine, SWEEP_SPEC_VERIFIED } from "../src/index.js";
+import { sweepSingleLine, SWEEP_SPEC_VERIFIED, MAX_TEXT_CHARS, MAX_VALUE_CHARS } from "../src/index.js";
 
 /**
- * The sweep is SPEC-PENDING (see src/core/sweep.ts). These tests pin the
- * PROVISIONAL behavior so accidental changes are caught; the `todo` block
- * at the bottom is the matrix to fill in from https://technocore.chat/llms.txt
- * before signed writes are trusted.
+ * Verified against the server's `clean_text` (flop-labs/technocore-chat,
+ * src/store.py, commit 41ecbbb): every character in Unicode categories
+ * Cc/Cf/Cs/Co/Zl/Zp becomes ONE space (no run collapsing), then trim.
+ * Expected values below were cross-validated against the Python reference:
+ *   "".join(" " if unicodedata.category(c) in ("Cc","Cf","Cs","Co","Zl","Zp")
+ *           else c for c in text).strip()
  */
 
-test("provisional: newlines/tabs collapse to single spaces", () => {
+test("spec: each invisible char becomes exactly one space — runs NOT collapsed", () => {
   assert.equal(sweepSingleLine("a\nb"), "a b");
-  assert.equal(sweepSingleLine("a\r\n\tb"), "a b");
-  assert.equal(sweepSingleLine("a \n \n b"), "a b");
+  assert.equal(sweepSingleLine("a\n\nb"), "a  b"); // two newlines -> two spaces
+  assert.equal(sweepSingleLine("a\r\n\tb"), "a   b"); // CR, LF, TAB -> three spaces
 });
 
-test("provisional: trims ends, collapses runs", () => {
-  assert.equal(sweepSingleLine("  hello   world  "), "hello world");
+test("spec: ordinary spaces (Zs) are NOT swept — consecutive spaces survive", () => {
+  assert.equal(sweepSingleLine("a  b"), "a  b");
+  assert.equal(sweepSingleLine("a  b"), "a  b"); // NBSP preserved
+  assert.equal(sweepSingleLine("a　b"), "a　b"); // ideographic space preserved
+});
+
+test("spec: trim both ends (including Zs at the edges)", () => {
+  assert.equal(sweepSingleLine("  hello   world  "), "hello   world");
   assert.equal(sweepSingleLine("\n\nx\n\n"), "x");
+  assert.equal(sweepSingleLine("　x　"), "x");
 });
 
-test("provisional: non-ASCII text passes through untouched", () => {
+test("spec: format characters (Cf) — ZWSP, ZWJ, bidi — each become a space", () => {
+  assert.equal(sweepSingleLine("a​b"), "a b"); // zero-width space
+  assert.equal(sweepSingleLine("a‮b"), "a b"); // RTL override
+  // ZWJ family emoji flattens to its parts separated by spaces
+  assert.equal(sweepSingleLine("\u{1F468}‍\u{1F469}‍\u{1F467}"), "\u{1F468} \u{1F469} \u{1F467}");
+});
+
+test("spec: line/paragraph separators (Zl/Zp) and lone surrogates (Cs)", () => {
+  assert.equal(sweepSingleLine("a b c"), "a b c");
+  assert.equal(sweepSingleLine("a\ud800b"), "a b"); // lone surrogate
+});
+
+test("spec: pure-invisible input sweeps to empty", () => {
+  assert.equal(sweepSingleLine("​​"), "");
+  assert.equal(sweepSingleLine(" \n\t "), "");
+});
+
+test("spec: no Unicode normalization; visible text untouched", () => {
   assert.equal(sweepSingleLine("日本語のテキスト"), "日本語のテキスト");
-  assert.equal(sweepSingleLine("emoji 🎉 ok"), "emoji 🎉 ok");
-});
-
-test("provisional: pipes and URL-special chars are preserved", () => {
   assert.equal(sweepSingleLine("a|b/c%d#e"), "a|b/c%d#e");
+  const decomposed = "é"; // é as base + combining accent (Mn — not swept)
+  assert.equal(sweepSingleLine(decomposed), decomposed);
 });
 
-test("sweep spec flag is still pending", () => {
-  // Flip SWEEP_SPEC_VERIFIED to true ONLY after the todo matrix below is
-  // filled in from the official spec and verified against the live server.
-  assert.equal(SWEEP_SPEC_VERIFIED, false);
+test("spec flag and server-side caps", () => {
+  assert.equal(SWEEP_SPEC_VERIFIED, true);
+  assert.equal(MAX_TEXT_CHARS, 4096);
+  assert.equal(MAX_VALUE_CHARS, 8192);
 });
 
-// ---- SPEC VERIFICATION MATRIX (fill in from llms.txt, then implement) ----
-test.todo("spec: exact CR/LF handling (space? strip? collapse?)");
-test.todo("spec: tab handling");
-test.todo("spec: leading/trailing whitespace");
-test.todo("spec: consecutive spaces (collapsed or preserved?)");
-test.todo("spec: Unicode whitespace (U+00A0, U+3000, ...)");
-test.todo("spec: Unicode normalization (NFC or none)");
-test.todo("spec: control characters (stripped or replaced?)");
-test.todo("spec: max length / truncation before or after sweep");
-test.todo("live: signed post accepted by server verifies with this sweep");
+test.todo("live: signed post accepted by the production server (run from a trusted machine)");

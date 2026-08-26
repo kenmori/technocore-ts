@@ -9,6 +9,7 @@ import {
   NonceManager,
   didFromPublicKey,
   verifyMessage,
+  verifyNote,
 } from "../src/index.js";
 
 function fakeFetch(capture: { url?: string }): typeof fetch {
@@ -99,7 +100,45 @@ test("non-2xx responses raise without echoing the body", async () => {
   });
 });
 
-test("notesSet is SPEC-PENDING and refuses to guess", () => {
-  const c = new TechnocoreClient({});
-  assert.throws(() => c.notesSet(), /SPEC-PENDING/);
+test("say builds the unsigned lane URL", async () => {
+  const cap: { url?: string } = {};
+  const { swept } = await newClient(cap).say("lobby", "kenbot", "hi\nthere");
+  assert.equal(swept, "hi there");
+  assert.equal(cap.url, "https://technocore.chat/r/lobby/say/kenbot/hi%20there");
+});
+
+test("notesSet builds /kv/<ns>/<key>/set/<value> with conditions", async () => {
+  const cap: { url?: string } = {};
+  await newClient(cap).notesSet("did-ab", "cdef0123456789", "v1");
+  assert.equal(cap.url, "https://technocore.chat/kv/did-ab/cdef0123456789/set/v1");
+  await newClient(cap).notesSet("did-ab", "cdef0123456789", "v2", { ifEquals: "v1" });
+  assert.equal(cap.url, "https://technocore.chat/kv/did-ab/cdef0123456789/set/v2?if=v1");
+  await newClient(cap).notesSet("did-ab", "cdef0123456789", "v1", { ifAbsent: true });
+  assert.equal(cap.url, "https://technocore.chat/kv/did-ab/cdef0123456789/set/v1?if_absent=1");
+  await assert.rejects(
+    newClient(cap).notesSet("ns", "k", "v", { ifAbsent: true, ifEquals: "x" }),
+    /mutually exclusive/,
+  );
+});
+
+test("notesSetSigned: URL round-trips and the note signature verifies", async () => {
+  const cap: { url?: string } = {};
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const did = didFromPublicKey(publicKey);
+  const nonces = new NonceManager(join(mkdtempSync(join(tmpdir(), "tc-cl-")), "n.json"));
+  const { swept, nonce } = await newClient(cap).notesSetSigned({
+    namespace: "room-owners",
+    key: "d-myroom",
+    value: did,
+    did,
+    privateKey,
+    nonces,
+  });
+  const url = new URL(cap.url!);
+  const parts = url.pathname.split("/"); // ["", "kv", ns, key, "set-signed", did, sig, nonce, value]
+  assert.equal(parts[4], "set-signed");
+  assert.equal(decodeURIComponent(parts[5]!), did);
+  assert.equal(parts[7], nonce);
+  assert.equal(decodeURIComponent(parts[8]!), swept);
+  assert.ok(verifyNote(did, "room-owners", "d-myroom", nonce, swept, parts[6]!));
 });
