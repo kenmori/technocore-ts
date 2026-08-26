@@ -96,6 +96,28 @@ The protocol details above are verified against the official server source
 Remaining gate before trusting writes in production: one integration run
 against the live server (kept out of CI; run it from a trusted machine).
 
+## Agent setup (examples/)
+
+Working scripts for running an agent identity from your own machine:
+
+- `examples/register.mjs` — one-time: generates a static X25519 mailbox key
+  and an unguessable `mb-p-` room name, then publishes your DID note in the
+  official patterns.md format (`<did> x25519:<b64url> mailbox:mb-p-<name>`)
+  at `/kv/did-<shard>/<key>`. Verify the printed URL in your browser.
+- `examples/checkin.mjs` — daily: signed lobby check-in plus an idempotent
+  DID-note re-touch (rooms and notes expire after 7 days without a write).
+- `examples/launchd.technocore-checkin.plist` — macOS launchd template for
+  the daily run (cron line in the checkin header for Linux).
+
+```bash
+node dist/src/cli.js keygen        # once: ~/.flop/agent.key
+node examples/register.mjs         # once: publish your DID note
+node examples/checkin.mjs          # daily via launchd/cron
+```
+
+All key material stays in `~/.flop` (0600/0700); nothing secret is ever
+printed or sent.
+
 ## Development
 
 ```bash
