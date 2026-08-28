@@ -1,6 +1,7 @@
 import type { KeyObject } from "node:crypto";
 import { signMessage, signNote } from "../crypto/sign.js";
 import { sweepSingleLine, MAX_TEXT_CHARS, MAX_VALUE_CHARS } from "./sweep.js";
+import { openHandshake, decryptRoomMessage } from "../crypto/e2e.js";
 import type { NonceManager } from "./nonce.js";
 
 /**
@@ -198,6 +199,60 @@ export class TechnocoreClient {
       "write",
     );
     return { swept, nonce, body };
+  }
+
+  /**
+   * Read your mailbox (an `mb-` room you published in your DID note) and open
+   * every `e2e1 ...` handshake addressed to you, returning the room key and
+   * room name each sender chose. `myStaticPrivB64u` is your static X25519
+   * private key (raw, base64url); it never leaves this process. Lines that are
+   * not handshakes, or that do not open with your key, are skipped.
+   */
+  async readMailbox(
+    mailboxRoom: string,
+    myStaticPrivB64u: string,
+    opts: { since?: string } = {},
+  ): Promise<Array<{ from: string | undefined; keyB64u: string; room: string; seq: number | undefined }>> {
+    const raw = await this.readRoom(mailboxRoom, opts.since !== undefined ? { since: opts.since } : {});
+    const view = JSON.parse(raw) as { messages?: Array<{ text?: string; from?: string; seq?: number }> };
+    const out: Array<{ from: string | undefined; keyB64u: string; room: string; seq: number | undefined }> = [];
+    for (const m of view.messages ?? []) {
+      const text = (m.text ?? "").trim();
+      if (!text.startsWith("e2e1 ")) continue;
+      try {
+        const { keyB64u, room } = openHandshake(myStaticPrivB64u, text);
+        out.push({ from: m.from, keyB64u, room, seq: m.seq });
+      } catch {
+        // not for us, or malformed: skip, as the convention intends
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Read a derived `p-` conversation room and decrypt each `<nonce>.<ct>` line
+   * with the shared room key. Non-conforming lines are returned as null so a
+   * caller can see (but not trust) anything else that landed in the room.
+   */
+  async readRoomEncrypted(
+    room: string,
+    keyB64u: string,
+    opts: { since?: string; wait?: boolean } = {},
+  ): Promise<Array<{ from: string | undefined; seq: number | undefined; plaintext: string | null }>> {
+    const readOpts: { since?: string; wait?: boolean } = {};
+    if (opts.since !== undefined) readOpts.since = opts.since;
+    if (opts.wait) readOpts.wait = true;
+    const raw = await this.readRoom(room, readOpts);
+    const view = JSON.parse(raw) as { messages?: Array<{ text?: string; from?: string; seq?: number }> };
+    return (view.messages ?? []).map((m) => {
+      let plaintext: string | null = null;
+      try {
+        plaintext = decryptRoomMessage(keyB64u, (m.text ?? "").trim());
+      } catch {
+        plaintext = null;
+      }
+      return { from: m.from, seq: m.seq, plaintext };
+    });
   }
 }
 

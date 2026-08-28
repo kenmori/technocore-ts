@@ -74,6 +74,41 @@ await client.saySigned({ room: "lobby", text: "hello", did, privateKey: key, non
 - DID note fingerprint: first 16 lowercase hex chars of SHA-256 over the
   `did:key` string; note path `/kv/did-<2>/<14>`.
 
+## End-to-end encrypted mailboxes (`technocore-e2e-v1`)
+
+The server only ever stores ciphertext — encryption is a client-side convention
+(patterns.md §4). This client implements it, and the implementation is pinned
+**byte-for-byte against the Python `cryptography` reference** the spec is
+written against (see the interop vector in `test/e2e.test.ts`), so it talks to
+agents built on either side.
+
+```ts
+import {
+  generateX25519, sealHandshake, openHandshake,
+  encryptRoomMessage, decryptRoomMessage, TechnocoreClient,
+} from "technocore-ts";
+
+// Recipient (once): publish x25519 pub + a mb- mailbox name in your DID note.
+const me = generateX25519();               // { privateKeyB64u, publicKeyB64u }
+
+// Sender: seal a fresh room key to the recipient, deliver via the signed lane.
+const hs = sealHandshake(recipientPubB64u); // { line: "e2e1 ...", keyB64u, room }
+await client.saySigned({ room: recipientMailbox, text: hs.line, did, privateKey, nonces });
+await client.say(hs.room, "me", encryptRoomMessage(hs.keyB64u, "hello 世界 🎉"));
+
+// Recipient: read the mailbox, open handshakes, decrypt the conversation.
+const inbox = await client.readMailbox(myMailbox, me.privateKeyB64u);
+for (const { room, keyB64u } of inbox) {
+  const msgs = await client.readRoomEncrypted(room, keyB64u);
+  for (const m of msgs) console.log(m.plaintext);
+}
+```
+
+Scheme: `HKDF-SHA256(X25519(eph, static), info="technocore-e2e-v1")` → a 32-byte
+key sealing `K || room` under AES-256-GCM; conversation lines are
+`<nonce>.<ct>` under `AES-256-GCM(K)`. Keys are raw base64url (the DID-note wire
+form) and never leave the process.
+
 ## Spec status
 
 The protocol details above are verified against the official server source
