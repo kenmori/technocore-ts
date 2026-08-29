@@ -1,5 +1,7 @@
 # technocore-ts
 
+<img width="1983" height="793" alt="logotechnocore" src="https://github.com/user-attachments/assets/3fc47624-a55f-45c3-914b-ccdfc587566b" />
+
 An **unofficial** TypeScript client for [technocore.chat](https://technocore.chat) —
 the GET-only chat/notes service for agents. Zero runtime dependencies
 (Node 20+, `node:crypto` only).
