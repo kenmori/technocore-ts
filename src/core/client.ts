@@ -1,7 +1,7 @@
 import type { KeyObject } from "node:crypto";
 import { signMessage, signNote } from "../crypto/sign.js";
 import { sweepSingleLine, MAX_TEXT_CHARS, MAX_VALUE_CHARS } from "./sweep.js";
-import { openHandshake, decryptRoomMessage } from "../crypto/e2e.js";
+import { sealHandshake, openHandshake, decryptRoomMessage } from "../crypto/e2e.js";
 import type { NonceManager } from "./nonce.js";
 
 /**
@@ -43,6 +43,18 @@ export interface NoteCondition {
   ifEquals?: string;
   /** Write only if the note does not exist yet (`?if_absent=1`). */
   ifAbsent?: boolean;
+}
+
+/** One message delivered by {@link TechnocoreClient.subscribe}. */
+export interface SubscriptionMessage {
+  /** Sender nick/DID as the server reported it (untrusted). */
+  from: string | undefined;
+  /** Server sequence number, the subscription cursor. */
+  seq: number | undefined;
+  /** The raw message text (already trimmed). */
+  text: string;
+  /** Decrypted plaintext, present only when a room key was given and the line decrypted. */
+  plaintext?: string;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -199,6 +211,116 @@ export class TechnocoreClient {
       "write",
     );
     return { swept, nonce, body };
+  }
+
+  /**
+   * Start an end-to-end encrypted conversation with a recipient in one call:
+   * seal a fresh room key + private `p-` room to their static X25519 public
+   * key, then deliver the `e2e1 ...` handshake into their mailbox over the
+   * signed say lane (so they can see who it came from). Returns everything the
+   * sender needs to talk in the derived room.
+   *
+   * `recipientStaticPubB64u` is the `x25519:<b64url>` value from the
+   * recipient's DID note. `handshake` is for deterministic testing only —
+   * omit it in real use so a fresh key and room are generated.
+   */
+  async sendHandshake(args: {
+    mailboxRoom: string;
+    recipientStaticPubB64u: string;
+    did: string;
+    privateKey: KeyObject;
+    nonces: NonceManager;
+    handshake?: { keyB64u?: string; room?: string; ephemeralPrivB64u?: string; nonceB64u?: string };
+  }): Promise<{ keyB64u: string; room: string; line: string; nonce: string; body: string }> {
+    const sealed = sealHandshake(args.recipientStaticPubB64u, args.handshake ?? {});
+    const { nonce, body } = await this.saySigned({
+      room: args.mailboxRoom,
+      text: sealed.line,
+      did: args.did,
+      privateKey: args.privateKey,
+      nonces: args.nonces,
+    });
+    return { keyB64u: sealed.keyB64u, room: sealed.room, line: sealed.line, nonce, body };
+  }
+
+  /**
+   * Subscribe to a room and receive each new message as it arrives — the agent
+   * "inbox" loop. Long-polls with `?wait=1`, advancing a `since=<seq>` cursor so
+   * only new messages are delivered, never re-delivered. If `keyB64u` is given,
+   * each `<nonce>.<ct>` line is decrypted and handed back as `plaintext`
+   * (messages that do not decrypt still arrive, with `plaintext` absent).
+   *
+   * Returns a handle with `stop()`. Pass `signal` to stop via an AbortController
+   * instead. Runs until stopped; errors go to `onError` and the loop retries.
+   */
+  subscribe(
+    room: string,
+    onMessage: (m: SubscriptionMessage) => void | Promise<void>,
+    opts: {
+      since?: string;
+      keyB64u?: string;
+      wait?: boolean;
+      signal?: AbortSignal;
+      onError?: (err: unknown) => void;
+      retryMs?: number;
+    } = {},
+  ): { stop: () => void } {
+    let stopped = false;
+    const stop = (): void => {
+      stopped = true;
+    };
+    if (opts.signal) {
+      if (opts.signal.aborted) stopped = true;
+      else opts.signal.addEventListener("abort", stop, { once: true });
+    }
+    const wait = opts.wait ?? true;
+    const retryMs = opts.retryMs ?? 2000;
+    let cursor = opts.since;
+
+    void (async () => {
+      while (!stopped) {
+        let raw: string;
+        try {
+          const readOpts: { since?: string; wait?: boolean } = {};
+          if (cursor !== undefined) readOpts.since = cursor;
+          if (wait) readOpts.wait = true;
+          raw = await this.readRoom(room, readOpts);
+        } catch (err) {
+          if (stopped) break;
+          opts.onError?.(err);
+          await sleep(retryMs);
+          continue;
+        }
+        let view: { messages?: Array<{ text?: string; from?: string; seq?: number }> };
+        try {
+          view = JSON.parse(raw);
+        } catch (err) {
+          opts.onError?.(err);
+          await sleep(retryMs);
+          continue;
+        }
+        for (const m of view.messages ?? []) {
+          if (stopped) break;
+          if (m.seq !== undefined) cursor = String(m.seq);
+          const text = (m.text ?? "").trim();
+          const msg: SubscriptionMessage = { from: m.from, seq: m.seq, text };
+          if (opts.keyB64u !== undefined) {
+            try {
+              msg.plaintext = decryptRoomMessage(opts.keyB64u, text);
+            } catch {
+              // not an e2e line, or not for us: deliver the raw text without plaintext
+            }
+          }
+          try {
+            await onMessage(msg);
+          } catch (err) {
+            opts.onError?.(err);
+          }
+        }
+      }
+    })();
+
+    return { stop };
   }
 
   /**

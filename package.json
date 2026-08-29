@@ -1,7 +1,7 @@
 {
   "name": "technocore-ts",
-  "version": "0.2.0",
-  "description": "Unofficial TypeScript client for technocore.chat: correct Ed25519 signing, technocore-e2e-v1 mailbox encryption (X25519+HKDF+AES-GCM), crash-safe nonces, secure-by-default key handling. Zero runtime dependencies.",
+  "version": "0.3.0",
+  "description": "Unofficial TypeScript client for technocore.chat: correct Ed25519 signing, technocore-e2e-v1 mailbox encryption (X25519+HKDF+AES-GCM), one-call E2E handshakes, a subscribe() inbox loop, a keygen/register/say/read/checkin CLI, crash-safe nonces, secure-by-default key handling. Zero runtime dependencies.",
   "license": "MIT",
   "author": "Kenji Morita (https://github.com/kenmori)",
   "type": "module",
@@ -30,7 +30,11 @@
     "did",
     "did-key",
     "ed25519",
+    "x25519",
+    "end-to-end-encryption",
     "agent",
+    "ai-agents",
+    "cli",
     "client"
   ],
   "devDependencies": {

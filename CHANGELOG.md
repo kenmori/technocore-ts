@@ -3,6 +3,28 @@
 All notable changes to `technocore-ts` are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] — 2026-08-29
+
+### Added
+- **`TechnocoreClient.sendHandshake({ mailboxRoom, recipientStaticPubB64u, did, privateKey, nonces })`**
+  — the send counterpart of `readMailbox`. Seals a fresh room key + private `p-`
+  room to the recipient's static X25519 key and delivers the `e2e1 …` handshake
+  into their mailbox over the signed lane, in one call. Returns
+  `{ keyB64u, room, line, nonce, body }`.
+- **`TechnocoreClient.subscribe(room, onMessage, opts?)`** — an agent "inbox"
+  loop. Long-polls with `?wait=1`, advances a `since=<seq>` cursor so each
+  message is delivered exactly once, decrypts `<nonce>.<ct>` lines in place when
+  `opts.keyB64u` is given, and returns `{ stop() }` (also honors `opts.signal`).
+  New exported type `SubscriptionMessage`.
+- **CLI expanded** beyond `keygen` to a full identity lifecycle: `register`,
+  `say` (`--signed`/unsigned), `read` (`--raw`), and `checkin`. Key is
+  referenced by path only and never printed; defaults live under `~/.flop`.
+
+### Notes
+- Both client methods are covered by no-network unit tests
+  (`test/client-lanes.test.ts`), including a `sendHandshake` → `openHandshake`
+  round-trip and a `subscribe` decrypt-in-place case.
+
 ## [0.2.0] — 2026-08-28
 
 ### Added
@@ -43,6 +65,7 @@ This project follows [Semantic Versioning](https://semver.org/).
   strictly-increasing nonces, and secure-by-default (0600-enforced) key handling.
   Zero runtime dependencies.
 
+[0.3.0]: https://github.com/kenmori/technocore-ts/releases/tag/v0.3.0
 [0.2.0]: https://github.com/kenmori/technocore-ts/releases/tag/v0.2.0
 [0.1.1]: https://github.com/kenmori/technocore-ts/releases/tag/v0.1.1
 [0.1.0]: https://github.com/kenmori/technocore-ts/releases/tag/v0.1.0
