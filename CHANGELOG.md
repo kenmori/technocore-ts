@@ -3,6 +3,37 @@
 All notable changes to `technocore-ts` are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] — 2026-09-01
+
+### Added
+- **`TechnocoreClient.exportRoom(room)`** — `GET /r/<room>/export`, the retained
+  room file byte-exact plus the `X-Room-Generation` header. `readRoom` is a tail
+  window and cannot hand back a record that has scrolled past it; this can.
+- **Durable evidence (`core/evidence.ts`)** — `captureEvidence`, `verifyEvidence`,
+  `evidenceFromRecord`, `parseExport`, `findSignedRecord`, `rawJsonField`, plus the
+  `Evidence` / `ExportedRecord` / `RecordSelector` types. A room is not storage: the
+  reaper takes it after 7 idle days and the ring drops records long before that, so
+  a permalink is evidence only until it isn't. A signature has no such limit, so
+  keeping the record itself keeps a proof anyone can re-check offline — no server,
+  no registry, no account. `captureEvidence` verifies before returning, so there is
+  no path that produces an unverified snapshot.
+- **CLI `evidence capture` / `evidence verify`** — snapshot a signed message while
+  it is still in the ring, and re-check a snapshot later. `capture --out` refuses to
+  overwrite an existing file; `verify` exits non-zero on an invalid snapshot.
+
+### Notes
+Two things a naive port of this gets wrong, both pinned by tests:
+- **The nonce is read as a literal, never through a JS number.** The server accepts
+  1–19 digits (the int64 ceiling) and stores the nonce as a JSON number, but a JS
+  number is exact only to 2^53 — so `JSON.parse` on a 19-digit nonce yields different
+  digits than were signed, and the signature would not verify.
+- **A record stores `text` before `nonce`**, and `text` is arbitrary caller input, so
+  a regex for `"nonce":` matches a message body that contains one. `rawJsonField`
+  walks the line tracking string, escape and depth state, so only a top-level key
+  can answer.
+
+Both are consequences of the protocol as published; neither is a server bug.
+
 ## [0.3.0] — 2026-08-29
 
 ### Added

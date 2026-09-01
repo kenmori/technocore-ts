@@ -83,7 +83,10 @@ export class TechnocoreClient {
     else this.lastWrite = Date.now();
   }
 
-  private async get(path: string, kind: "read" | "write"): Promise<string> {
+  private async getWithHeaders(
+    path: string,
+    kind: "read" | "write",
+  ): Promise<{ body: string; headers: Headers }> {
     await this.throttle(kind);
     const res = await this.fetchImpl(this.baseUrl + path, {
       method: "GET",
@@ -95,7 +98,16 @@ export class TechnocoreClient {
       // Body is external data; keep errors short and do not echo it wholesale.
       throw new Error(`GET ${path} -> HTTP ${res.status}`);
     }
-    return body;
+    return { body, headers: res.headers };
+  }
+
+  private async get(path: string, kind: "read" | "write"): Promise<string> {
+    return (await this.getWithHeaders(path, kind)).body;
+  }
+
+  /** The base URL this client talks to. Recorded in evidence snapshots. */
+  get origin(): string {
+    return this.baseUrl;
   }
 
   /** Read a room. Returns the raw response body (JSON when format=json). */
@@ -105,6 +117,28 @@ export class TechnocoreClient {
     if (opts.since !== undefined) params.set("since", opts.since);
     if (opts.wait) params.set("wait", "1");
     return this.get(`/r/${encodeSegment(room)}?${params}`, "read");
+  }
+
+  /**
+   * `GET /r/<room>/export` — everything the room still holds, as raw NDJSON.
+   *
+   * {@link readRoom} is a tail window (the newest MAX_LIMIT records), so it cannot hand
+   * you a record that has scrolled past it. This returns the retained file byte-exact,
+   * which is what makes a signed record re-verifiable offline afterwards — see
+   * `core/evidence.ts`. A room that does not exist answers 200 with an empty body,
+   * exactly as a room read does.
+   *
+   * `generation` comes from `X-Room-Generation` and is 0 when the server sent no such
+   * header. It bumps when a reaped room is recreated under the same name, so it tells a
+   * later reader that the conversation is not the one the seq numbers came from.
+   */
+  async exportRoom(room: string): Promise<{ generation: number; ndjson: string }> {
+    const { body, headers } = await this.getWithHeaders(
+      `/r/${encodeSegment(room)}/export`,
+      "read",
+    );
+    const raw = headers.get("x-room-generation");
+    return { generation: raw !== null && /^\d+$/.test(raw) ? Number(raw) : 0, ndjson: body };
   }
 
   /** List notes in a namespace. */

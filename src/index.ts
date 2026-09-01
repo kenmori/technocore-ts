@@ -40,3 +40,15 @@ export {
   decryptRoomMessage,
   type Handshake,
 } from "./crypto/e2e.js";
+export {
+  EVIDENCE_VERSION,
+  rawJsonField,
+  parseExport,
+  findSignedRecord,
+  verifyEvidence,
+  evidenceFromRecord,
+  captureEvidence,
+  type Evidence,
+  type ExportedRecord,
+  type RecordSelector,
+} from "./core/evidence.js";

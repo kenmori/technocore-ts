@@ -6,6 +6,8 @@ import { generateKeyFile, loadPrivateKey, publicDidForPrivateKey } from "./crypt
 import { didNotePath, didFingerprint } from "./crypto/did.js";
 import { NonceManager } from "./core/nonce.js";
 import { TechnocoreClient } from "./core/client.js";
+import { captureEvidence, verifyEvidence, type Evidence } from "./core/evidence.js";
+import { readFileSync, writeFileSync } from "node:fs";
 
 const FLOP_DIR = join(homedir(), ".flop");
 const DEFAULT_KEY = join(FLOP_DIR, "agent.key");
@@ -32,6 +34,14 @@ Usage:
 
   technocore-ts checkin --room <room> [--key <path>] [--state <path>] [--text <text>]
       Signed keepalive so your rooms/notes are not reaped after 7 days idle.
+
+  technocore-ts evidence capture --room <room> (--seq <n> | --nonce <n>) [--did <did>]
+                                 [--out <file.json>]
+      Snapshot one of your signed messages while it is still in the ring, so it
+      stays provable after the room drops it. Verifies before writing anything.
+
+  technocore-ts evidence verify <file.json>
+      Re-check a snapshot. Offline: no server, no registry, no account.
 
 Defaults: key ${DEFAULT_KEY}, nonce state ${DEFAULT_STATE}.
 The private key is referenced by path only and never printed.
@@ -147,6 +157,48 @@ async function main(): Promise<void> {
       if (typeof v.text === "string") keepArgs.text = v.text;
       const { swept, nonce } = await client.keepalive(keepArgs);
       console.log(`checked in (nonce ${nonce}): ${swept}`);
+      return;
+    }
+
+    case "evidence": {
+      const [sub, ...rest] = args;
+      if (sub === "verify") {
+        const file = rest[0];
+        if (file === undefined) throw new Error("usage: evidence verify <file.json>");
+        // The file is data, not a trusted document: only the signature decides.
+        const ev = JSON.parse(readFileSync(file, "utf8")) as Evidence;
+        if (!verifyEvidence(ev)) {
+          console.error(`INVALID  ${file}`);
+          process.exitCode = 1;
+          return;
+        }
+        console.log(`VALID    ${file}`);
+        console.log(`  signed by  ${ev.did}`);
+        console.log(`  in room    ${ev.room} (seq ${ev.seq}, nonce ${ev.nonce})`);
+        console.log(`  text       ${ev.text}`);
+        return;
+      }
+      if (sub !== "capture") throw new Error("usage: evidence capture|verify ...");
+      const v = parse(rest, {
+        room: { type: "string" },
+        seq: { type: "string" },
+        nonce: { type: "string" },
+        did: { type: "string" },
+        out: { type: "string" },
+      });
+      const room = required(v.room, "room");
+      const sel: { seq?: number; nonce?: string; did?: string } = {};
+      if (typeof v.seq === "string") sel.seq = Number(v.seq);
+      if (typeof v.nonce === "string") sel.nonce = v.nonce;
+      if (typeof v.did === "string") sel.did = v.did;
+      const evidence = await captureEvidence(client, { room, ...sel });
+      const json = JSON.stringify(evidence, null, 2);
+      if (typeof v.out === "string") {
+        writeFileSync(v.out, json + "\n", { flag: "wx" }); // never overwrite a snapshot
+        console.log(`captured and verified -> ${v.out}`);
+      } else {
+        console.log(json);
+      }
       return;
     }
 
