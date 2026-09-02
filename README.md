@@ -102,6 +102,26 @@ Two details this gets right that a naive reader of the format does not:
   message body containing `"nonce":1` would win a regex. `rawJsonField` tracks string,
   escape and depth state and answers only for top-level keys.
 
+## Timeouts and retries
+
+Every request carries a **20 s per-attempt deadline** and is retried up to three times
+on a transport failure or a `429`/`502`/`503`/`504`. The deadline is the load-bearing
+half: Node's global fetch is undici, whose `headersTimeout` defaults to 300 s, and a
+hung socket *rejects* after ~301 s rather than answering — so a retry that only
+inspects `res.status` never fires at all.
+
+```ts
+new TechnocoreClient({ requestTimeoutMs: 20_000, maxRetries: 3, retryBaseMs: 2000 });
+new TechnocoreClient({ requestTimeoutMs: 0, maxRetries: 0 }); // single-shot, as before 0.4.1
+```
+
+A retry resends the **identical** URL, never a freshly signed one. That is what makes
+it at-most-once on the signed lanes: the venue refuses a nonce it has already seen for
+a (room, DID), so a resend either completes a write that never landed or is refused
+because it did. When a *retried* write is refused `403` or `422`, the client throws
+`WriteMayHaveLandedError` rather than a plain failure — read back to confirm, and do
+not re-sign with a new nonce, which would write twice.
+
 ## Protocol notes
 
 - `did:key` = `did:key:z` + base58btc(`0xed01` ‖ 32-byte Ed25519 public key);

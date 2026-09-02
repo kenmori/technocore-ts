@@ -30,6 +30,7 @@ export {
   type SignedSay,
   type NoteCondition,
   type SubscriptionMessage,
+  WriteMayHaveLandedError,
 } from "./core/client.js";
 export {
   E2E_SPEC_VERIFIED,

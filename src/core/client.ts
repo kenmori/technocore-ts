@@ -28,6 +28,54 @@ export interface ClientOptions {
   fetchImpl?: typeof fetch;
   minReadIntervalMs?: number;
   minWriteIntervalMs?: number;
+  /**
+   * Per-attempt deadline. Node's global fetch is undici, whose `headersTimeout`
+   * defaults to 300 s — measured, a socket that connects and then sends nothing
+   * rejects after 301 s with `UND_ERR_HEADERS_TIMEOUT`. That is a hang in every
+   * sense that matters to a caller, and it rejects rather than answering, so a
+   * status-code retry never sees it. Default 20 s. 0 disables the deadline.
+   */
+  requestTimeoutMs?: number;
+  /** Extra attempts after the first. Default 3; 0 restores single-shot behaviour. */
+  maxRetries?: number;
+  /** First backoff, doubled per attempt and capped at 30 s. Default 2000 ms. */
+  retryBaseMs?: number;
+}
+
+/**
+ * A retried write was refused in a way that usually means the *earlier* attempt
+ * landed: the venue refuses a nonce it has already seen for a (room, DID), and
+ * refuses an identical message text already in the room's duplicate window.
+ *
+ * Thrown instead of a plain failure so a caller does not read its own success as
+ * someone else's, and does not resend with a fresh nonce — that would be a second
+ * write, not a retry. Verify by reading the room or the note; do not re-sign.
+ */
+export class WriteMayHaveLandedError extends Error {
+  readonly status: number;
+  readonly attempts: number;
+  constructor(path: string, status: number, attempts: number) {
+    super(
+      `GET ${path} -> HTTP ${status} on retry ${attempts}: the first attempt may have ` +
+        "landed. Read back before re-sending; a fresh nonce would write twice.",
+    );
+    this.name = "WriteMayHaveLandedError";
+    this.status = status;
+    this.attempts = attempts;
+  }
+}
+
+/** 429 and the infrastructure 5xx. 500 is excluded: it is not advertised as transient. */
+function retryableStatus(status: number): boolean {
+  return status === 429 || status === 502 || status === 503 || status === 504;
+}
+
+/** Seconds from a `Retry-After` header, when it is the delta-seconds form. */
+function retryAfterMs(headers: Headers): number | undefined {
+  const raw = headers.get("retry-after");
+  if (raw === null) return undefined;
+  const seconds = Number(raw.trim());
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined;
 }
 
 export interface SignedSay {
@@ -64,6 +112,9 @@ export class TechnocoreClient {
   private readonly fetchImpl: typeof fetch;
   private readonly minRead: number;
   private readonly minWrite: number;
+  private readonly timeoutMs: number;
+  private readonly maxRetries: number;
+  private readonly retryBaseMs: number;
   private lastRead = 0;
   private lastWrite = 0;
 
@@ -72,6 +123,9 @@ export class TechnocoreClient {
     this.fetchImpl = opts.fetchImpl ?? fetch;
     this.minRead = opts.minReadIntervalMs ?? 600;
     this.minWrite = opts.minWriteIntervalMs ?? 2500;
+    this.timeoutMs = opts.requestTimeoutMs ?? 20_000;
+    this.maxRetries = opts.maxRetries ?? 3;
+    this.retryBaseMs = opts.retryBaseMs ?? 2000;
   }
 
   private async throttle(kind: "read" | "write"): Promise<void> {
@@ -83,22 +137,62 @@ export class TechnocoreClient {
     else this.lastWrite = Date.now();
   }
 
+  /**
+   * One request, retried on a transport failure or an infrastructure refusal.
+   *
+   * A retry always resends the IDENTICAL URL. On the signed lanes that is what
+   * makes it at-most-once: the venue refuses a nonce it has already seen for a
+   * (room, DID), so a resend either completes a write that never landed or is
+   * refused because it did. Re-signing with a fresh nonce would be a second
+   * write, so this layer never does it — see {@link WriteMayHaveLandedError}.
+   *
+   * Only 429/502/503/504 and transport failures are retried. A 4xx is the
+   * venue's considered answer and repeating it just spends budget.
+   */
   private async getWithHeaders(
     path: string,
     kind: "read" | "write",
   ): Promise<{ body: string; headers: Headers }> {
-    await this.throttle(kind);
-    const res = await this.fetchImpl(this.baseUrl + path, {
-      method: "GET",
-      redirect: "error",
-      headers: { "user-agent": "technocore-ts" },
-    });
-    const body = await res.text();
-    if (!res.ok) {
+    for (let attempt = 0; ; attempt++) {
+      await this.throttle(kind);
+      let res: Response;
+      try {
+        res = await this.fetchImpl(this.baseUrl + path, {
+          method: "GET",
+          redirect: "error",
+          headers: { "user-agent": "technocore-ts" },
+          ...(this.timeoutMs > 0 ? { signal: AbortSignal.timeout(this.timeoutMs) } : {}),
+        });
+      } catch (cause) {
+        // A reset, a refused connection, or this attempt's own deadline. All are
+        // "no answer", which is exactly what a status-code retry cannot see.
+        if (attempt >= this.maxRetries) {
+          throw new Error(`GET ${path} failed after ${attempt + 1} attempts`, { cause });
+        }
+        await sleep(this.backoffMs(attempt));
+        continue;
+      }
+      const body = await res.text();
+      if (res.ok) return { body, headers: res.headers };
+      if (retryableStatus(res.status) && attempt < this.maxRetries) {
+        await sleep(retryAfterMs(res.headers) ?? this.backoffMs(attempt));
+        continue;
+      }
+      // A write we already sent once, refused now in the two shapes that mean it
+      // landed the first time. Naming that beats reporting a failure for a write
+      // that succeeded.
+      if (kind === "write" && attempt > 0 && (res.status === 403 || res.status === 422)) {
+        throw new WriteMayHaveLandedError(path, res.status, attempt + 1);
+      }
       // Body is external data; keep errors short and do not echo it wholesale.
       throw new Error(`GET ${path} -> HTTP ${res.status}`);
     }
-    return { body, headers: res.headers };
+  }
+
+  /** Exponential, capped at 30 s. The venue's own round trips reach ~20 s under
+   * load, so a one-second first retry mostly re-queues into the same congestion. */
+  private backoffMs(attempt: number): number {
+    return Math.min(this.retryBaseMs * 2 ** attempt, 30_000);
   }
 
   private async get(path: string, kind: "read" | "write"): Promise<string> {

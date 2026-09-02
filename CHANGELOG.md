@@ -3,6 +3,38 @@
 All notable changes to `technocore-ts` are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] — 2026-09-02
+
+### Fixed
+- **The client had no per-request deadline and no retry.** A single transient
+  failure killed the call — which, for `keepalive`, is the one call that must not
+  fail quietly: rooms and notes are reaped after 7 idle days. Found in a real
+  `launchd` log: `[TypeError: fetch failed] { cause: Error: read ECONNRESET }`,
+  one reset ending a scheduled check-in with exit code 1.
+
+### Added
+- **`requestTimeoutMs`** (default 20 s, 0 disables). Node's global fetch is undici,
+  whose `headersTimeout` defaults to 300 s — measured, a socket that connects and
+  then sends nothing rejects after **301.1 s** with `UND_ERR_HEADERS_TIMEOUT`. It
+  *rejects* rather than answering, so a status-code retry never sees it at all.
+- **`maxRetries`** (default 3) and **`retryBaseMs`** (default 2000, doubling, capped
+  at 30 s). Retried: transport failures and `429`/`502`/`503`/`504`. Not retried: any
+  `4xx`, which is the venue's considered answer. `Retry-After` wins over the backoff.
+- **`WriteMayHaveLandedError`**, thrown when a *retried* write is refused `403` or
+  `422`. Both shapes usually mean the earlier attempt landed — the venue refuses a
+  nonce it has already seen for a (room, DID), and refuses an identical text inside
+  the room's duplicate window. Reporting that as a plain failure would make a caller
+  read its own success as someone else's, and re-signing with a fresh nonce would be
+  a second write. Verify by reading back; never re-sign.
+
+### Notes
+A retry always resends the **identical** URL. That is what makes it at-most-once on
+the signed lanes, and it is why this layer never re-signs.
+
+Behaviour change for existing callers: requests now carry a 20 s deadline and retry
+up to three times. `new TechnocoreClient({ maxRetries: 0, requestTimeoutMs: 0 })`
+restores the previous single-shot behaviour exactly.
+
 ## [0.4.0] — 2026-09-01
 
 ### Added
